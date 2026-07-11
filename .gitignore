@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+*.local
+
+# Generated artifacts
+*_onepager.pdf
+sample_onepager.pdf
+
+# OS / editor
+.DS_Store
+.vscode/

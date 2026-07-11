@@ -14,6 +14,16 @@ import json
 import os
 import sys
 
+# Load a local .env file (if present) so ANTHROPIC_API_KEY can live there during
+# development. On Railway/production the platform provides the env var and no
+# .env file exists, so this is a harmless no-op. Optional dependency.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 # Model is a constant so it's trivial to swap. claude-sonnet-4-5 is an active
 # model; change this string to use a different one (e.g. "claude-opus-4-8").
 MODEL = "claude-sonnet-4-5"

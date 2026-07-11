@@ -18,12 +18,10 @@ import tempfile
 from flask import (
     Flask,
     Response,
-    flash,
-    redirect,
+    jsonify,
     render_template_string,
     request,
     send_file,
-    url_for,
 )
 
 from analyze import AnalysisError, analyze
@@ -39,7 +37,7 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
 
 
-PAGE = """
+PAGE = r"""
 <!doctype html>
 <html lang="en">
 <head>
@@ -78,6 +76,8 @@ PAGE = """
     button:disabled { background: #475569; cursor: progress; }
     .flash { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca;
              padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
+    .ok { background: #14532d; border: 1px solid #16a34a; color: #bbf7d0;
+          padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
     .meta { margin-top: 1.5rem; color: #64748b; font-size: .8rem; line-height: 1.5; }
     code { background: #0f172a; padding: .1rem .35rem; border-radius: 5px; color: #cbd5e1; }
   </style>
@@ -88,17 +88,12 @@ PAGE = """
     <p class="sub">Upload a pitch deck and get a polished single-page investor PDF,
       analyzed by Claude.</p>
 
-    {% with messages = get_flashed_messages() %}
-      {% if messages %}
-        {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
-      {% endif %}
-    {% endwith %}
+    <div id="flash" class="flash" style="display:none"></div>
+    <div id="ok" class="ok" style="display:none">✅ PDF generated and downloaded. Ready for another deck.</div>
 
-    <form method="post" action="{{ url_for('generate') }}" enctype="multipart/form-data"
-          onsubmit="document.getElementById('go').disabled=true;
-                    document.getElementById('go').textContent='Analyzing… (this can take ~20–40s)';">
+    <form id="form" method="post" action="{{ url_for('generate') }}" enctype="multipart/form-data">
       <label class="file">
-        <input type="file" name="deck" accept=".pptx,.pdf,.docx" required
+        <input id="deck" type="file" name="deck" accept=".pptx,.pdf,.docx" required
                onchange="document.getElementById('fname').textContent = this.files[0]?.name || '';">
         <div>📄 Click to choose a deck</div>
         <div class="hint">.pptx, .pdf, or .docx · up to {{ max_mb }} MB</div>
@@ -112,6 +107,69 @@ PAGE = """
       {% if not key_set %}<br><strong>⚠ Server has no ANTHROPIC_API_KEY set.</strong>{% endif %}
     </div>
   </div>
+
+  <script>
+    const form  = document.getElementById('form');
+    const go     = document.getElementById('go');
+    const flash  = document.getElementById('flash');
+    const okMsg  = document.getElementById('ok');
+    const deck   = document.getElementById('deck');
+    const fname  = document.getElementById('fname');
+    const LABEL  = 'Generate one-pager PDF';
+
+    function showError(msg) {
+      flash.textContent = msg;
+      flash.style.display = 'block';
+    }
+
+    function filenameFromHeader(res, fallback) {
+      const cd = res.headers.get('Content-Disposition') || '';
+      const m = /filename="?([^"]+)"?/.exec(cd);
+      return (m && m[1]) || fallback;
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      flash.style.display = 'none';
+      okMsg.style.display = 'none';
+      go.disabled = true;
+      go.textContent = 'Analyzing… (this can take ~20–40s)';
+
+      try {
+        const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
+
+        if (!res.ok) {
+          let msg = 'Something went wrong (HTTP ' + res.status + ').';
+          try { const j = await res.json(); if (j && j.error) msg = j.error; }
+          catch (_) { /* non-JSON error body */ }
+          showError(msg);
+          return;
+        }
+
+        // Success -> download the PDF blob.
+        const blob = await res.blob();
+        const url  = URL.createObjectURL(blob);
+        const stem = (deck.files[0]?.name || 'deck').replace(/\.[^.]+$/, '');
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filenameFromHeader(res, stem + '_onepager.pdf');
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+
+        // Reset so the next deck can be generated without a refresh.
+        form.reset();
+        fname.textContent = '';
+        okMsg.style.display = 'block';
+      } catch (err) {
+        showError('Network error: ' + err.message);
+      } finally {
+        go.disabled = false;
+        go.textContent = LABEL;
+      }
+    });
+  </script>
 </body>
 </html>
 """
@@ -130,17 +188,20 @@ def healthz() -> Response:
     return Response("ok", mimetype="text/plain")
 
 
+def _err(message: str, status: int = 400) -> Response:
+    """Return a JSON error the front-end fetch handler can display inline."""
+    return jsonify({"error": message}), status
+
+
 @app.post("/generate")
 def generate():
     file = request.files.get("deck")
     if file is None or not file.filename:
-        flash("Please choose a file to upload.")
-        return redirect(url_for("index"))
+        return _err("Please choose a file to upload.")
 
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ALLOWED_EXT:
-        flash(f"Unsupported file type '{ext}'. Use .pptx, .pdf, or .docx.")
-        return redirect(url_for("index"))
+        return _err(f"Unsupported file type '{ext}'. Use .pptx, .pdf, or .docx.")
 
     stem = os.path.splitext(os.path.basename(file.filename))[0] or "deck"
 
@@ -152,27 +213,24 @@ def generate():
         try:
             deck_text = extract(in_path)
         except UnsupportedFileError as exc:
-            flash(str(exc))
-            return redirect(url_for("index"))
+            return _err(str(exc))
         except Exception as exc:  # noqa: BLE001
-            flash(f"Could not read the file: {exc}")
-            return redirect(url_for("index"))
+            return _err(f"Could not read the file: {exc}")
 
         if not deck_text.strip():
-            flash("No readable text found in the file. Is the deck image-only or empty?")
-            return redirect(url_for("index"))
+            return _err(
+                "No readable text found in the file. Is the deck image-only or empty?"
+            )
 
         try:
             data = analyze(deck_text)
         except AnalysisError as exc:
-            flash(str(exc))
-            return redirect(url_for("index"))
+            return _err(str(exc), status=502)
 
         try:
             render(data, out_path)
         except Exception as exc:  # noqa: BLE001
-            flash(f"Failed to render the PDF: {exc}")
-            return redirect(url_for("index"))
+            return _err(f"Failed to render the PDF: {exc}", status=500)
 
         # Read into memory so the temp dir can be cleaned up on exit.
         with open(out_path, "rb") as fh:

@@ -137,6 +137,10 @@ def _send_via_resend(
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # api.resend.com is behind Cloudflare, which bans urllib's default
+            # "Python-urllib/x.y" User-Agent (Cloudflare error 1010). Send a
+            # normal UA so the request isn't flagged as a bad bot signature.
+            "User-Agent": "deal-by-numbers/1.0 (+https://github.com/Mateo0G/DealByNumbers)",
         },
         method="POST",
     )

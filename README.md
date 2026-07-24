@@ -92,7 +92,7 @@ job ([jobs.py](jobs.py)):
 2. The page polls `GET /status/<job_id>` every few seconds (each poll is its own
    fast request).
 3. The background thread extracts → analyzes → renders, then **saves the PDF to
-   disk** keyed by `job_id` and **emails a copy** to `info@tencapital.group`.
+   disk** keyed by `job_id` and **emails a copy** to `mateo.ghercioiu@gmail.com`.
 4. The next poll returns `ready` plus a download link; the page auto-triggers the
    download from `GET /download/<job_id>` and shows a manual download button.
 
@@ -116,7 +116,7 @@ The app is ready to deploy on [Railway](https://railway.app) as a web service.
    - `ANTHROPIC_API_KEY` = your key from the Anthropic Console.
    - To email a copy of every generated one-pager, set `SMTP_HOST`, `SMTP_USER`
      and `SMTP_PASSWORD` (for Gmail, an App Password). Optionally `SMTP_PORT`,
-     `SMTP_FROM`, and `MAIL_TO` (defaults to `info@tencapital.group`). If these
+     `SMTP_FROM`, and `MAIL_TO` (defaults to `mateo.ghercioiu@gmail.com`). If these
      are unset the email step is skipped; the PDF is still generated and
      downloadable. See [`.env.example`](.env.example).
    - (optional) `FLASK_SECRET_KEY` = any random string.
@@ -164,7 +164,7 @@ render.py        Stage 3 — reportlab PDF layout (fit-then-flow)
 main.py          CLI wiring (argparse) + pipeline orchestration
 app.py           Flask web app (upload -> job id -> poll -> email + download)
 jobs.py          Disk-backed background job store (extract/analyze/render/email)
-mailer.py        SMTP email of the finished one-pager (default info@tencapital.group)
+mailer.py        SMTP email of the finished one-pager (default mateo.ghercioiu@gmail.com)
 requirements.txt pinned dependencies
 Procfile         Railway/Nixpacks start command (gunicorn)
 railway.json     Railway build + deploy config

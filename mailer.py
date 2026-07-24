@@ -20,7 +20,7 @@ from email.message import EmailMessage
 # Where generated documents are always copied. Overridable via $MAIL_TO for
 # testing or a different destination, but defaults to the address the feature
 # was built for.
-DEFAULT_RECIPIENT = "info@tencapital.group"
+DEFAULT_RECIPIENT = "mateo.ghercioiu@gmail.com"
 
 
 class MailError(Exception):

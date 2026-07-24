@@ -180,6 +180,9 @@ PAGE = r"""
              j.mail_status === 'skipped' ? 'not emailed (SMTP off).' :
              'not emailed (send failed) — you can still download it.');
           okMsg.style.display = 'block';
+          if (j.mail_status === 'failed' && j.mail_error) {
+            showError('Email error: ' + j.mail_error);
+          }
           // Auto-trigger the download, and leave the button for a manual retry.
           window.location.href = j.download_url;
           resetUi();
@@ -295,6 +298,8 @@ def status(job_id: str):
         payload["download_name"] = record.get("download_name")
         payload["company_name"] = record.get("company_name")
         payload["mail_status"] = record.get("mail_status")
+        if record.get("mail_error"):
+            payload["mail_error"] = record.get("mail_error")
     elif record.get("status") == jobs.STATUS_ERROR:
         payload["error"] = record.get("error")
     return jsonify(payload)

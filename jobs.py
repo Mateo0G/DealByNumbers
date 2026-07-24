@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -170,11 +171,21 @@ def _run_job(job_id: str, in_path: str, stem: str, base_record: dict) -> None:
                 )
                 record["mail_status"] = "sent"
                 record["mail_to"] = sent_to
+                print(f"[job {job_id}] emailed one-pager to {sent_to}", flush=True)
             except MailError as exc:
                 record["mail_status"] = "failed"
                 record["mail_error"] = str(exc)
+                # Surface the real SMTP error in the server (Railway) logs so the
+                # cause is diagnosable — the browser only sees a generic message.
+                print(f"[job {job_id}] email failed: {exc}", file=sys.stderr, flush=True)
         else:
             record["mail_status"] = "skipped"
+            print(
+                f"[job {job_id}] email skipped: SMTP not configured "
+                "(need SMTP_HOST, SMTP_USER, SMTP_PASSWORD)",
+                file=sys.stderr,
+                flush=True,
+            )
         _write_status(job_id, record)
     finally:
         try:

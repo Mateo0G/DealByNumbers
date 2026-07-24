@@ -181,8 +181,8 @@ def _run_job(job_id: str, in_path: str, stem: str, base_record: dict) -> None:
         else:
             record["mail_status"] = "skipped"
             print(
-                f"[job {job_id}] email skipped: SMTP not configured "
-                "(need SMTP_HOST, SMTP_USER, SMTP_PASSWORD)",
+                f"[job {job_id}] email skipped: no transport configured "
+                "(set RESEND_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASSWORD)",
                 file=sys.stderr,
                 flush=True,
             )

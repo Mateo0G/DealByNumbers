@@ -1,9 +1,16 @@
-"""Email a generated one-pager PDF to a fixed recipient over SMTP.
+"""Email a generated one-pager PDF to a fixed recipient.
 
 Used by the web app's background worker: after a deck is analyzed and rendered,
 a copy of the PDF is mailed so a record of every generated document lands in an
-inbox. Transport is plain SMTP (STARTTLS), configured from environment variables
-so it works with a Gmail app password or any SMTP provider.
+inbox.
+
+Two transports are supported, chosen from the environment:
+
+  * Resend (HTTPS API, port 443) -- used when ``RESEND_API_KEY`` is set. This is
+    the reliable choice on hosts like Railway that block outbound SMTP ports
+    (a plain SMTP connect there fails with "Network is unreachable").
+  * SMTP (STARTTLS) -- used otherwise, when SMTP_HOST/USER/PASSWORD are set.
+    Fine for local runs or hosts that allow outbound SMTP.
 
 Sending is best-effort from the caller's point of view: the PDF has already been
 written to the results store by the time we get here, so a mail failure is
@@ -13,8 +20,12 @@ be about ``MailError``.
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 import smtplib
+import urllib.error
+import urllib.request
 from email.message import EmailMessage
 
 # Where generated documents are always copied. Overridable via $MAIL_TO for
@@ -22,18 +33,30 @@ from email.message import EmailMessage
 # was built for.
 DEFAULT_RECIPIENT = "mateo.ghercioiu@gmail.com"
 
+# Resend's shared onboarding sender. It works with no domain verification, but
+# Resend then only allows delivery to the account owner's own email address —
+# which is exactly our default recipient. Override with $RESEND_FROM once a
+# domain is verified (e.g. "One-Pagers <noreply@yourdomain.com>").
+DEFAULT_RESEND_FROM = "onboarding@resend.dev"
+
+RESEND_ENDPOINT = "https://api.resend.com/emails"
+
 
 class MailError(Exception):
     """Raised when the PDF could not be emailed."""
 
 
-def mail_enabled() -> bool:
-    """True when SMTP is configured enough to attempt a send."""
+def _smtp_configured() -> bool:
     return bool(
         os.getenv("SMTP_HOST")
         and os.getenv("SMTP_USER")
         and os.getenv("SMTP_PASSWORD")
     )
+
+
+def mail_enabled() -> bool:
+    """True when at least one transport is configured enough to attempt a send."""
+    return bool(os.getenv("RESEND_API_KEY")) or _smtp_configured()
 
 
 def email_document(
@@ -45,50 +68,105 @@ def email_document(
 ) -> str:
     """Email ``pdf_bytes`` as an attachment to ``recipient``.
 
-    Reads SMTP settings from the environment:
+    Transport selection:
+        RESEND_API_KEY set -> send via the Resend HTTPS API (recommended on
+                              Railway and other SMTP-blocked hosts).
+        else               -> send via SMTP (SMTP_HOST/PORT/USER/PASSWORD).
 
+    Common vars:
+        MAIL_TO        optional recipient override, defaults to DEFAULT_RECIPIENT
+
+    Resend vars:
+        RESEND_API_KEY required to use Resend
+        RESEND_FROM    optional From, defaults to onboarding@resend.dev
+
+    SMTP vars:
         SMTP_HOST      required, e.g. ``smtp.gmail.com``
         SMTP_PORT      optional, default 587 (STARTTLS)
         SMTP_USER      required, the authenticating account / From address
         SMTP_PASSWORD  required, app password or SMTP password
         SMTP_FROM      optional From override, defaults to SMTP_USER
-        MAIL_TO        optional recipient override, defaults to DEFAULT_RECIPIENT
-
-    Args:
-        pdf_bytes:    the rendered PDF content to attach.
-        filename:     attachment file name, e.g. ``acme_onepager.pdf``.
-        company_name: used in the subject/body for context.
-        recipient:    explicit recipient; falls back to $MAIL_TO then
-                      DEFAULT_RECIPIENT.
 
     Returns:
         The address the document was sent to.
 
     Raises:
-        MailError: configuration is missing or the SMTP conversation failed.
+        MailError: no transport is configured, or the send failed.
     """
-    host = os.getenv("SMTP_HOST")
-    user = os.getenv("SMTP_USER")
-    password = os.getenv("SMTP_PASSWORD")
-    if not (host and user and password):
-        raise MailError(
-            "SMTP is not configured. Set SMTP_HOST, SMTP_USER and SMTP_PASSWORD "
-            "(see .env.example) to email generated documents."
-        )
-
-    port = int(os.getenv("SMTP_PORT", "587"))
-    sender = os.getenv("SMTP_FROM", user)
     to_addr = recipient or os.getenv("MAIL_TO") or DEFAULT_RECIPIENT
-
-    msg = EmailMessage()
-    msg["From"] = sender
-    msg["To"] = to_addr
-    msg["Subject"] = f"Investor one-pager: {company_name}"
-    msg.set_content(
+    subject = f"Investor one-pager: {company_name}"
+    body = (
         f"Attached is the generated one-page investor summary for {company_name}.\n\n"
         f"File: {filename}\n\n"
         "— deal-by-numbers"
     )
+
+    if os.getenv("RESEND_API_KEY"):
+        return _send_via_resend(pdf_bytes, filename, subject, body, to_addr)
+    if _smtp_configured():
+        return _send_via_smtp(pdf_bytes, filename, subject, body, to_addr)
+
+    raise MailError(
+        "Email is not configured. Set RESEND_API_KEY (recommended on Railway) "
+        "or SMTP_HOST/SMTP_USER/SMTP_PASSWORD (see .env.example)."
+    )
+
+
+def _send_via_resend(
+    pdf_bytes: bytes, filename: str, subject: str, body: str, to_addr: str
+) -> str:
+    """Send over the Resend HTTPS API (port 443)."""
+    api_key = os.getenv("RESEND_API_KEY")
+    sender = os.getenv("RESEND_FROM", DEFAULT_RESEND_FROM)
+
+    payload = {
+        "from": sender,
+        "to": [to_addr],
+        "subject": subject,
+        "text": body,
+        "attachments": [
+            {
+                "filename": filename,
+                "content": base64.b64encode(pdf_bytes).decode("ascii"),
+            }
+        ],
+    }
+    req = urllib.request.Request(
+        RESEND_ENDPOINT,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            resp.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")
+        raise MailError(f"Resend API error {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise MailError(f"Resend request failed: {exc.reason}") from exc
+
+    return to_addr
+
+
+def _send_via_smtp(
+    pdf_bytes: bytes, filename: str, subject: str, body: str, to_addr: str
+) -> str:
+    """Send over SMTP with STARTTLS."""
+    host = os.getenv("SMTP_HOST")
+    user = os.getenv("SMTP_USER")
+    password = os.getenv("SMTP_PASSWORD")
+    port = int(os.getenv("SMTP_PORT", "587"))
+    sender = os.getenv("SMTP_FROM", user)
+
+    msg = EmailMessage()
+    msg["From"] = sender
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.set_content(body)
     msg.add_attachment(
         pdf_bytes,
         maintype="application",

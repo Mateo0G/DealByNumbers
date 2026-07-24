@@ -114,11 +114,16 @@ The app is ready to deploy on [Railway](https://railway.app) as a web service.
    the server with gunicorn.
 3. **Set the environment variables** in the service's **Variables** tab:
    - `ANTHROPIC_API_KEY` = your key from the Anthropic Console.
-   - To email a copy of every generated one-pager, set `SMTP_HOST`, `SMTP_USER`
-     and `SMTP_PASSWORD` (for Gmail, an App Password). Optionally `SMTP_PORT`,
-     `SMTP_FROM`, and `MAIL_TO` (defaults to `mateo.ghercioiu@gmail.com`). If these
-     are unset the email step is skipped; the PDF is still generated and
-     downloadable. See [`.env.example`](.env.example).
+   - To email a copy of every generated one-pager, set **`RESEND_API_KEY`**
+     (from [resend.com](https://resend.com)). Railway **blocks outbound SMTP**,
+     so plain SMTP fails there with `Network is unreachable`; Resend sends over
+     HTTPS and works. With the default `onboarding@resend.dev` sender and no
+     verified domain, Resend only delivers to your Resend account's own email —
+     so sign up with the same address as `MAIL_TO` (defaults to
+     `mateo.ghercioiu@gmail.com`). Verify a domain and set `RESEND_FROM` to send
+     anywhere. Locally, `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` still work as an
+     alternative. If nothing is set the email step is skipped; the PDF is still
+     generated and downloadable. See [`.env.example`](.env.example).
    - (optional) `FLASK_SECRET_KEY` = any random string.
 4. Railway provides `$PORT` automatically; gunicorn binds to it. A health check
    is served at `/healthz`.

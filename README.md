@@ -69,7 +69,8 @@ deck"*.
 ## Run as a web app (local)
 
 The same pipeline is exposed as a Flask web app ([app.py](app.py)) — upload a
-deck in the browser and download the generated PDF.
+deck in the browser, and the generated PDF is both emailed to the team and made
+available to download.
 
 ```bash
 # with the venv active and ANTHROPIC_API_KEY set:
@@ -78,6 +79,28 @@ python app.py
 ```
 
 In production a WSGI server is used instead of the dev server (see below).
+
+### How the request flow avoids proxy timeouts
+
+Analyzing a deck with Claude takes ~20–40s — long enough that Railway's edge
+proxy would cut a single, long-held `upload → analyze → download` request and
+leave the browser spinning forever. So the work is decoupled into a background
+job ([jobs.py](jobs.py)):
+
+1. `POST /generate` accepts the upload, starts a background thread, and returns a
+   `job_id` immediately — a fast response the proxy never times out.
+2. The page polls `GET /status/<job_id>` every few seconds (each poll is its own
+   fast request).
+3. The background thread extracts → analyzes → renders, then **saves the PDF to
+   disk** keyed by `job_id` and **emails a copy** to `info@tencapital.group`.
+4. The next poll returns `ready` plus a download link; the page auto-triggers the
+   download from `GET /download/<job_id>` and shows a manual download button.
+
+Job status and finished PDFs are stored on the local disk (a temp dir by
+default, keyed by `job_id`) so they are visible to every gunicorn worker on the
+instance — not just the one that started the job. Artifacts are swept after a TTL
+(6h default) and are lost on redeploy/restart, which is fine: downloads happen
+within minutes and every document is also emailed.
 
 ## Deploy to Railway
 
@@ -89,12 +112,18 @@ The app is ready to deploy on [Railway](https://railway.app) as a web service.
    Railway auto-detects Python via `requirements.txt` (Nixpacks) and uses the
    included [`railway.json`](railway.json) / [`Procfile`](Procfile) to start
    the server with gunicorn.
-3. **Set the environment variable** in the service's **Variables** tab:
+3. **Set the environment variables** in the service's **Variables** tab:
    - `ANTHROPIC_API_KEY` = your key from the Anthropic Console.
+   - To email a copy of every generated one-pager, set `SMTP_HOST`, `SMTP_USER`
+     and `SMTP_PASSWORD` (for Gmail, an App Password). Optionally `SMTP_PORT`,
+     `SMTP_FROM`, and `MAIL_TO` (defaults to `info@tencapital.group`). If these
+     are unset the email step is skipped; the PDF is still generated and
+     downloadable. See [`.env.example`](.env.example).
    - (optional) `FLASK_SECRET_KEY` = any random string.
 4. Railway provides `$PORT` automatically; gunicorn binds to it. A health check
    is served at `/healthz`.
-5. Open the generated public URL, upload a deck, and download the one-pager.
+5. Open the generated public URL and upload a deck. The one-pager is emailed to
+   the team and offered as a download once the background job finishes.
 
 Deployment files included:
 
@@ -133,7 +162,9 @@ extract.py       Stage 1 — file parsing (pptx / pdf / docx)
 analyze.py       Stage 2 — Anthropic API call + JSON parsing
 render.py        Stage 3 — reportlab PDF layout (fit-then-flow)
 main.py          CLI wiring (argparse) + pipeline orchestration
-app.py           Flask web app (upload deck -> download PDF)
+app.py           Flask web app (upload -> job id -> poll -> email + download)
+jobs.py          Disk-backed background job store (extract/analyze/render/email)
+mailer.py        SMTP email of the finished one-pager (default info@tencapital.group)
 requirements.txt pinned dependencies
 Procfile         Railway/Nixpacks start command (gunicorn)
 railway.json     Railway build + deploy config

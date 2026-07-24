@@ -1,19 +1,28 @@
-"""Web app — Pitch Deck -> Investor One-Pager PDF.
+"""Web app — Pitch Deck -> Investor One-Pager PDF (async / job-based).
 
-A thin Flask front end over the same three-stage pipeline used by the CLI:
-upload a deck (.pptx/.pdf/.docx), it is extracted, analyzed by Claude, and
-rendered to a one-pager PDF that is streamed back as a download.
+Why this is not a single request/response: analyzing a deck with Claude takes
+~20-40s. Railway's edge proxy will cut an HTTP connection that stays open that
+long, so a synchronous "upload -> analyze -> respond" request would appear to
+hang forever and never deliver a file. Instead the work is decoupled:
 
-Deployment (Railway): set the ANTHROPIC_API_KEY environment variable in the
-Railway service settings; the app reads it server-side. The process binds to
-the port Railway provides via $PORT.
+    POST /generate         accepts the upload, starts a background job, and
+                           returns a job id immediately (fast response).
+    GET  /status/<job_id>  a small, fast poll the page hits every few seconds.
+    GET  /download/<job_id> streams the finished PDF once the job is ready.
+
+The background job (see jobs.py) extracts, analyzes, renders, stores the PDF on
+disk for later download, AND emails a copy to info@tencapital.group. None of
+those steps run inside the request that the browser is waiting on, so nothing is
+vulnerable to the proxy timeout.
+
+Deployment (Railway): set ANTHROPIC_API_KEY, and the SMTP_* variables (see
+.env.example) to enable the emailed copy. The process binds to $PORT.
 """
 
 from __future__ import annotations
 
 import io
 import os
-import tempfile
 
 from flask import (
     Flask,
@@ -22,11 +31,11 @@ from flask import (
     render_template_string,
     request,
     send_file,
+    url_for,
 )
 
-from analyze import AnalysisError, analyze
-from extract import UnsupportedFileError, extract
-from render import render
+import jobs
+from mailer import DEFAULT_RECIPIENT, mail_enabled
 
 MAX_UPLOAD_MB = 25
 ALLOWED_EXT = {".pptx", ".pdf", ".docx"}
@@ -78,6 +87,19 @@ PAGE = r"""
              padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
     .ok { background: #14532d; border: 1px solid #16a34a; color: #bbf7d0;
           padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
+    .status { display: none; align-items: center; gap: .7rem; margin-top: 1.5rem;
+              color: #cbd5e1; font-size: .95rem; }
+    .status .spinner {
+      width: 18px; height: 18px; border: 3px solid #334155; border-top-color: #3b82f6;
+      border-radius: 50%; animation: spin .8s linear infinite; flex: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    a.download {
+      display: none; margin-top: 1rem; text-align: center; padding: .85rem 1rem;
+      border-radius: 10px; background: #16a34a; color: white; font-weight: 600;
+      text-decoration: none;
+    }
+    a.download:hover { background: #15803d; }
     .meta { margin-top: 1.5rem; color: #64748b; font-size: .8rem; line-height: 1.5; }
     code { background: #0f172a; padding: .1rem .35rem; border-radius: 5px; color: #cbd5e1; }
   </style>
@@ -89,7 +111,7 @@ PAGE = r"""
       analyzed by Claude.</p>
 
     <div id="flash" class="flash" style="display:none"></div>
-    <div id="ok" class="ok" style="display:none">✅ PDF generated and downloaded. Ready for another deck.</div>
+    <div id="ok" class="ok" style="display:none"></div>
 
     <form id="form" method="post" action="{{ url_for('generate') }}" enctype="multipart/form-data">
       <label class="file">
@@ -102,38 +124,92 @@ PAGE = r"""
       <button id="go" type="submit">Generate one-pager PDF</button>
     </form>
 
+    <div id="status" class="status">
+      <div class="spinner"></div>
+      <div id="statusText">Working…</div>
+    </div>
+
+    <a id="download" class="download" href="#">⬇ Download your PDF</a>
+
     <div class="meta">
-      The uploaded file is processed in memory and not stored.
+      The uploaded file is processed on the server and a copy of every generated
+      one-pager is emailed to <code>{{ recipient }}</code>.
       {% if not key_set %}<br><strong>⚠ Server has no ANTHROPIC_API_KEY set.</strong>{% endif %}
+      {% if not mail_ready %}<br><strong>⚠ SMTP is not configured; the emailed copy will be skipped.</strong>{% endif %}
     </div>
   </div>
 
   <script>
-    const form  = document.getElementById('form');
-    const go     = document.getElementById('go');
-    const flash  = document.getElementById('flash');
-    const okMsg  = document.getElementById('ok');
-    const deck   = document.getElementById('deck');
-    const fname  = document.getElementById('fname');
-    const LABEL  = 'Generate one-pager PDF';
+    const form    = document.getElementById('form');
+    const go       = document.getElementById('go');
+    const flash    = document.getElementById('flash');
+    const okMsg    = document.getElementById('ok');
+    const deck     = document.getElementById('deck');
+    const fname    = document.getElementById('fname');
+    const statusEl = document.getElementById('status');
+    const statusTx = document.getElementById('statusText');
+    const download = document.getElementById('download');
+    const LABEL    = 'Generate one-pager PDF';
+    const POLL_MS  = 3000;
+
+    let pollTimer = null;
 
     function showError(msg) {
       flash.textContent = msg;
       flash.style.display = 'block';
     }
 
-    function filenameFromHeader(res, fallback) {
-      const cd = res.headers.get('Content-Disposition') || '';
-      const m = /filename="?([^"]+)"?/.exec(cd);
-      return (m && m[1]) || fallback;
+    function resetUi() {
+      go.disabled = false;
+      go.textContent = LABEL;
+      statusEl.style.display = 'none';
+    }
+
+    async function poll(jobId) {
+      try {
+        const res = await fetch('/status/' + jobId, { cache: 'no-store' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const j = await res.json();
+
+        if (j.status === 'ready') {
+          statusEl.style.display = 'none';
+          download.href = j.download_url;
+          download.style.display = 'block';
+          okMsg.textContent = '✅ Your one-pager is ready — a copy was ' +
+            (j.mail_status === 'sent' ? 'emailed to the team.' :
+             j.mail_status === 'skipped' ? 'not emailed (SMTP off).' :
+             'not emailed (send failed) — you can still download it.');
+          okMsg.style.display = 'block';
+          // Auto-trigger the download, and leave the button for a manual retry.
+          window.location.href = j.download_url;
+          resetUi();
+          form.reset();
+          fname.textContent = '';
+          return;
+        }
+
+        if (j.status === 'error') {
+          showError(j.error || 'Generation failed.');
+          resetUi();
+          return;
+        }
+
+        // still processing -> poll again
+        pollTimer = setTimeout(() => poll(jobId), POLL_MS);
+      } catch (err) {
+        // A transient network/poll hiccup shouldn't kill the whole job; retry.
+        pollTimer = setTimeout(() => poll(jobId), POLL_MS);
+      }
     }
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
       flash.style.display = 'none';
       okMsg.style.display = 'none';
+      download.style.display = 'none';
+      if (pollTimer) clearTimeout(pollTimer);
       go.disabled = true;
-      go.textContent = 'Analyzing… (this can take ~20–40s)';
+      go.textContent = 'Uploading…';
 
       try {
         const res = await fetch(form.action, { method: 'POST', body: new FormData(form) });
@@ -143,30 +219,18 @@ PAGE = r"""
           try { const j = await res.json(); if (j && j.error) msg = j.error; }
           catch (_) { /* non-JSON error body */ }
           showError(msg);
+          resetUi();
           return;
         }
 
-        // Success -> download the PDF blob.
-        const blob = await res.blob();
-        const url  = URL.createObjectURL(blob);
-        const stem = (deck.files[0]?.name || 'deck').replace(/\.[^.]+$/, '');
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filenameFromHeader(res, stem + '_onepager.pdf');
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-
-        // Reset so the next deck can be generated without a refresh.
-        form.reset();
-        fname.textContent = '';
-        okMsg.style.display = 'block';
+        const j = await res.json();
+        statusEl.style.display = 'flex';
+        statusTx.textContent = 'Analyzing with Claude… (this can take ~20–40s). You can keep this tab open.';
+        go.textContent = 'Working…';
+        poll(j.job_id);
       } catch (err) {
         showError('Network error: ' + err.message);
-      } finally {
-        go.disabled = false;
-        go.textContent = LABEL;
+        resetUi();
       }
     });
   </script>
@@ -178,7 +242,11 @@ PAGE = r"""
 @app.get("/")
 def index() -> str:
     return render_template_string(
-        PAGE, max_mb=MAX_UPLOAD_MB, key_set=bool(os.environ.get("ANTHROPIC_API_KEY"))
+        PAGE,
+        max_mb=MAX_UPLOAD_MB,
+        key_set=bool(os.environ.get("ANTHROPIC_API_KEY")),
+        mail_ready=mail_enabled(),
+        recipient=os.environ.get("MAIL_TO", DEFAULT_RECIPIENT),
     )
 
 
@@ -195,6 +263,7 @@ def _err(message: str, status: int = 400) -> Response:
 
 @app.post("/generate")
 def generate():
+    """Accept an upload, start the background job, and return its id at once."""
     file = request.files.get("deck")
     if file is None or not file.filename:
         return _err("Please choose a file to upload.")
@@ -205,42 +274,50 @@ def generate():
 
     stem = os.path.splitext(os.path.basename(file.filename))[0] or "deck"
 
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = os.path.join(tmp, "input" + ext)
-        out_path = os.path.join(tmp, "onepager.pdf")
-        file.save(in_path)
+    upload_bytes = file.read()
+    if not upload_bytes:
+        return _err("The uploaded file is empty.")
 
-        try:
-            deck_text = extract(in_path)
-        except UnsupportedFileError as exc:
-            return _err(str(exc))
-        except Exception as exc:  # noqa: BLE001
-            return _err(f"Could not read the file: {exc}")
+    job_id = jobs.start_job(upload_bytes, ext, stem)
+    return jsonify({"job_id": job_id, "status": jobs.STATUS_PROCESSING}), 202
 
-        if not deck_text.strip():
-            return _err(
-                "No readable text found in the file. Is the deck image-only or empty?"
-            )
 
-        try:
-            data = analyze(deck_text)
-        except AnalysisError as exc:
-            return _err(str(exc), status=502)
+@app.get("/status/<job_id>")
+def status(job_id: str):
+    """Fast poll: report a job's state, plus a download link once ready."""
+    record = jobs.read_status(job_id)
+    if record is None:
+        return _err("Unknown or expired job id.", status=404)
 
-        try:
-            render(data, out_path)
-        except Exception as exc:  # noqa: BLE001
-            return _err(f"Failed to render the PDF: {exc}", status=500)
+    payload = {"status": record.get("status")}
+    if record.get("status") == jobs.STATUS_READY:
+        payload["download_url"] = url_for("download", job_id=job_id)
+        payload["download_name"] = record.get("download_name")
+        payload["company_name"] = record.get("company_name")
+        payload["mail_status"] = record.get("mail_status")
+    elif record.get("status") == jobs.STATUS_ERROR:
+        payload["error"] = record.get("error")
+    return jsonify(payload)
 
-        # Read into memory so the temp dir can be cleaned up on exit.
-        with open(out_path, "rb") as fh:
-            pdf_bytes = fh.read()
+
+@app.get("/download/<job_id>")
+def download(job_id: str):
+    """Stream the finished PDF for a ready job."""
+    record = jobs.read_status(job_id)
+    if record is None:
+        return _err("Unknown or expired job id.", status=404)
+    if record.get("status") != jobs.STATUS_READY:
+        return _err("This document is not ready yet.", status=409)
+
+    data = jobs.pdf_bytes(job_id)
+    if data is None:
+        return _err("The generated file is no longer available.", status=410)
 
     return send_file(
-        io.BytesIO(pdf_bytes),
+        io.BytesIO(data),
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=f"{stem}_onepager.pdf",
+        download_name=record.get("download_name") or f"{record.get('stem', 'deck')}_onepager.pdf",
     )
 
 

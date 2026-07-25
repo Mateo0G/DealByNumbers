@@ -11,12 +11,12 @@ hang forever and never deliver a file. Instead the work is decoupled:
     GET  /download/<job_id> streams the finished PDF once the job is ready.
 
 The background job (see jobs.py) extracts, analyzes, renders, stores the PDF on
-disk for later download, AND emails a copy to info@tencapital.group. None of
-those steps run inside the request that the browser is waiting on, so nothing is
-vulnerable to the proxy timeout.
+disk for later download, AND emails a copy to the configured recipient (see
+mailer.py). None of those steps run inside the request that the browser is
+waiting on, so nothing is vulnerable to the proxy timeout.
 
-Deployment (Railway): set ANTHROPIC_API_KEY, and the SMTP_* variables (see
-.env.example) to enable the emailed copy. The process binds to $PORT.
+Deployment (Railway): set ANTHROPIC_API_KEY, and RESEND_API_KEY (or the SMTP_*
+variables) to enable the emailed copy. The process binds to $PORT.
 """
 
 from __future__ import annotations
@@ -51,119 +51,265 @@ PAGE = r"""
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pitch Deck → Investor One-Pager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TEN Capital Network — Deck to One-Pager</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
-    :root { color-scheme: light dark; }
-    * { box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      margin: 0; min-height: 100vh; display: grid; place-items: center;
-      background: #0f172a; color: #e2e8f0; padding: 2rem;
+    :root{
+      --navy-950:#0B1526; --navy-900:#101E33; --navy-800:#16283F; --navy-700:#1E354F;
+      --coral:#EE5A4E; --coral-soft:#F0776C; --amber:#F3A22A; --teal:#35BEBB;
+      --ink-100:#F3F6FA; --ink-300:#C4D0E0; --ink-500:#7E90A8; --ink-600:#5C6E86;
     }
-    .card {
-      width: 100%; max-width: 560px; background: #1e293b; border: 1px solid #334155;
-      border-radius: 16px; padding: 2.25rem; box-shadow: 0 20px 50px rgba(0,0,0,.35);
+    *{ box-sizing:border-box; }
+    html,body{
+      margin:0; padding:0; background:var(--navy-950); color:var(--ink-100);
+      font-family:'Inter',sans-serif; min-height:100vh;
     }
-    h1 { margin: 0 0 .35rem; font-size: 1.5rem; color: #f8fafc; }
-    p.sub { margin: 0 0 1.75rem; color: #94a3b8; font-size: .95rem; }
-    label.file {
-      display: block; border: 2px dashed #475569; border-radius: 12px; padding: 2rem 1rem;
-      text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
-      background: #0f172a;
+    body{ display:flex; align-items:center; justify-content:center; padding:48px 20px;
+      position:relative; overflow-x:hidden; }
+
+    /* ambient tri-color glow, echoing the logo's three figures */
+    body::before{
+      content:""; position:fixed; inset:0; pointer-events:none; z-index:0;
+      background:
+        radial-gradient(480px 380px at 14% 8%, rgba(238,90,78,0.16), transparent 60%),
+        radial-gradient(480px 380px at 86% 6%, rgba(243,162,42,0.13), transparent 60%),
+        radial-gradient(560px 420px at 50% 100%, rgba(53,190,187,0.14), transparent 60%);
     }
-    label.file:hover { border-color: #3b82f6; background: #14203a; }
-    label.file .hint { color: #64748b; font-size: .85rem; margin-top: .4rem; }
-    #fname { color: #93c5fd; font-weight: 600; margin-top: .6rem; min-height: 1.1em; }
-    input[type=file] { display: none; }
-    button {
-      margin-top: 1.5rem; width: 100%; padding: .85rem 1rem; border: 0; border-radius: 10px;
-      background: #2563eb; color: white; font-size: 1rem; font-weight: 600; cursor: pointer;
-      transition: background .15s;
+
+    .stage{ position:relative; z-index:1; width:100%; max-width:620px; }
+
+    /* brand lockup */
+    .brand{ display:flex; align-items:center; gap:12px; margin-bottom:28px; padding-left:4px; }
+    .brand-logo{ height:44px; width:auto; display:block; }
+    .brand-fallback{ display:none; align-items:center; gap:12px; }
+    .brand-mark{ width:34px; height:34px; flex-shrink:0; }
+    .brand-word{
+      font-family:'Sora',sans-serif; font-weight:800; font-size:15px; letter-spacing:0.04em;
+      line-height:1.15; color:var(--ink-100); text-transform:uppercase;
     }
-    button:hover { background: #1d4ed8; }
-    button:disabled { background: #475569; cursor: progress; }
-    .flash { background: #7f1d1d; border: 1px solid #b91c1c; color: #fecaca;
-             padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
-    .ok { background: #14532d; border: 1px solid #16a34a; color: #bbf7d0;
-          padding: .75rem 1rem; border-radius: 10px; margin-bottom: 1.25rem; font-size: .9rem; }
-    .status { display: none; align-items: center; gap: .7rem; margin-top: 1.5rem;
-              color: #cbd5e1; font-size: .95rem; }
-    .status .spinner {
-      width: 18px; height: 18px; border: 3px solid #334155; border-top-color: #3b82f6;
-      border-radius: 50%; animation: spin .8s linear infinite; flex: none;
+    .brand-word span{
+      display:block; font-weight:600; font-size:10px; letter-spacing:0.22em;
+      color:var(--ink-500); margin-top:2px;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    a.download {
-      display: none; margin-top: 1rem; text-align: center; padding: .85rem 1rem;
-      border-radius: 10px; background: #16a34a; color: white; font-weight: 600;
-      text-decoration: none;
+
+    .card{
+      background:linear-gradient(180deg, var(--navy-900) 0%, var(--navy-800) 100%);
+      border:1px solid var(--navy-700); border-radius:20px; padding:44px 44px 36px;
+      box-shadow:0 30px 60px -20px rgba(0,0,0,0.55), inset 0 1px 0 rgba(255,255,255,0.03);
+      position:relative; overflow:hidden;
     }
-    a.download:hover { background: #15803d; }
-    .meta { margin-top: 1.5rem; color: #64748b; font-size: .8rem; line-height: 1.5; }
-    code { background: #0f172a; padding: .1rem .35rem; border-radius: 5px; color: #cbd5e1; }
+    .card::after{
+      content:""; position:absolute; top:-2px; left:44px; right:44px; height:2px;
+      background:linear-gradient(90deg, var(--coral), var(--amber), var(--teal)); border-radius:2px;
+    }
+
+    .eyebrow{
+      display:flex; align-items:center; gap:8px; font-family:'JetBrains Mono',monospace;
+      font-size:11px; letter-spacing:0.14em; text-transform:uppercase; color:var(--teal); margin-bottom:14px;
+    }
+    .eyebrow::before{
+      content:""; width:6px; height:6px; border-radius:50%; background:var(--teal);
+      box-shadow:0 0 0 3px rgba(53,190,187,0.18);
+    }
+
+    h1{ font-family:'Sora',sans-serif; font-size:28px; font-weight:700; line-height:1.25;
+      margin:0 0 12px; letter-spacing:-0.01em; }
+    h1 .arrow{ color:var(--ink-500); font-weight:400; margin:0 4px; }
+    h1 .to{ background:linear-gradient(90deg, var(--coral-soft), var(--amber));
+      -webkit-background-clip:text; background-clip:text; color:transparent; }
+
+    .lede{ color:var(--ink-300); font-size:15px; line-height:1.6; margin:0 0 32px; max-width:46ch; }
+
+    /* dropzone */
+    .dropzone{
+      display:block; border:1.5px dashed var(--navy-700); border-radius:14px; padding:38px 24px;
+      text-align:center; cursor:pointer; background:rgba(255,255,255,0.015);
+      transition:border-color .18s ease, background .18s ease, transform .18s ease;
+    }
+    .dropzone:hover{ border-color:var(--teal); background:rgba(53,190,187,0.05); }
+    .dropzone:active{ transform:scale(0.997); }
+    .dropzone.drag{ border-color:var(--teal); background:rgba(53,190,187,0.09); }
+
+    .dropzone-icon{
+      width:38px; height:38px; margin:0 auto 14px; border-radius:10px;
+      background:linear-gradient(135deg, rgba(238,90,78,0.16), rgba(243,162,42,0.16));
+      border:1px solid var(--navy-700); display:flex; align-items:center; justify-content:center;
+    }
+    .dropzone-icon svg{ width:18px; height:18px; }
+    .dropzone-title{ font-size:15px; font-weight:600; color:var(--ink-100); margin-bottom:6px; }
+    .dropzone-sub{ font-family:'JetBrains Mono',monospace; font-size:11.5px; color:var(--ink-500); letter-spacing:0.01em; }
+    .dropzone-sub b{ color:var(--ink-300); font-weight:500; }
+    .fname{ margin-top:12px; font-family:'JetBrains Mono',monospace; font-size:12px;
+      color:var(--teal); min-height:1em; word-break:break-all; }
+    .file-input{ display:none; }
+
+    /* CTA */
+    .cta{
+      width:100%; margin-top:22px; padding:16px 20px; border:none; border-radius:12px;
+      background:linear-gradient(90deg, var(--coral) 0%, var(--coral-soft) 45%, var(--amber) 100%);
+      color:#17130E; font-family:'Sora',sans-serif; font-weight:700; font-size:15px; letter-spacing:0.01em;
+      cursor:pointer; transition:filter .15s ease, transform .15s ease;
+      box-shadow:0 10px 24px -10px rgba(238,90,78,0.45);
+    }
+    .cta:hover{ filter:brightness(1.06); transform:translateY(-1px); }
+    .cta:active{ transform:translateY(0); }
+    .cta:disabled{ filter:grayscale(0.35) brightness(0.8); cursor:progress; transform:none; box-shadow:none; }
+
+    /* status + result states */
+    .status{
+      display:none; align-items:center; gap:12px; margin-top:20px; padding:14px 16px;
+      border-radius:12px; background:rgba(255,255,255,0.02); border:1px solid var(--navy-700);
+      color:var(--ink-300); font-size:14px; line-height:1.5;
+    }
+    .spinner{
+      width:18px; height:18px; border-radius:50%; flex:none;
+      border:2.5px solid var(--navy-700); border-top-color:var(--teal); animation:spin .8s linear infinite;
+    }
+    @keyframes spin{ to{ transform:rotate(360deg); } }
+
+    .download{
+      display:none; width:100%; margin-top:16px; padding:15px 20px; border-radius:12px;
+      text-align:center; text-decoration:none; font-family:'Sora',sans-serif; font-weight:700; font-size:15px;
+      color:#07201F; background:linear-gradient(90deg, var(--teal), #56D0CD);
+      box-shadow:0 10px 24px -10px rgba(53,190,187,0.5); transition:filter .15s ease;
+    }
+    .download:hover{ filter:brightness(1.06); }
+
+    .flash{
+      display:none; margin-top:20px; padding:14px 16px; border-radius:12px; font-size:13px; line-height:1.5;
+      background:rgba(238,90,78,0.10); border:1px solid rgba(238,90,78,0.4); color:#F3B4AE;
+    }
+    .ok{
+      display:none; margin-top:20px; padding:14px 16px; border-radius:12px; font-size:13px; line-height:1.5;
+      background:rgba(53,190,187,0.10); border:1px solid rgba(53,190,187,0.4); color:#A7E7E5;
+    }
+
+    /* footnote / disclosure */
+    .disclosure{
+      margin-top:22px; padding-top:18px; border-top:1px solid var(--navy-700);
+      font-size:12px; line-height:1.6; color:var(--ink-500);
+    }
+    .disclosure code{
+      font-family:'JetBrains Mono',monospace; background:var(--navy-950); border:1px solid var(--navy-700);
+      color:var(--ink-300); padding:2px 6px; border-radius:5px; font-size:11.5px;
+    }
+    .disclosure .warn{ color:var(--amber); }
+
+    footer{
+      text-align:center; margin-top:22px; font-family:'JetBrains Mono',monospace; font-size:11px;
+      letter-spacing:0.08em; color:var(--ink-600); text-transform:uppercase;
+    }
+
+    @media (max-width:480px){
+      .card{ padding:32px 24px 28px; }
+      h1{ font-size:23px; }
+    }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h1>Pitch Deck → Investor One-Pager</h1>
-    <p class="sub">Upload a pitch deck and get a polished single-page investor PDF,
-      analyzed by Claude.</p>
+  <div class="stage">
 
-    <div id="flash" class="flash" style="display:none"></div>
-    <div id="ok" class="ok" style="display:none"></div>
-
-    <form id="form" method="post" action="{{ url_for('generate') }}" enctype="multipart/form-data">
-      <label class="file">
-        <input id="deck" type="file" name="deck" accept=".pptx,.pdf,.docx" required
-               onchange="document.getElementById('fname').textContent = this.files[0]?.name || '';">
-        <div>📄 Click to choose a deck</div>
-        <div class="hint">.pptx, .pdf, or .docx · up to {{ max_mb }} MB</div>
-        <div id="fname"></div>
-      </label>
-      <button id="go" type="submit">Generate one-pager PDF</button>
-    </form>
-
-    <div id="status" class="status">
-      <div class="spinner"></div>
-      <div id="statusText">Working…</div>
+    <div class="brand">
+      <!-- Real logo if static/logo.png exists; otherwise fall back to the SVG lockup. -->
+      <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}"
+           alt="TEN Capital Network"
+           onerror="this.remove(); document.getElementById('brandFallback').style.display='flex';">
+      <div class="brand-fallback" id="brandFallback">
+        <svg class="brand-mark" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M50 6 C64 6 74 16 74 16" stroke="#F3A22A" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <path d="M76 66 C76 82 63 92 63 92" stroke="#35BEBB" stroke-width="11" stroke-linecap="round" fill="none"/>
+          <path d="M24 66 C24 82 37 92 37 92" stroke="#EE5A4E" stroke-width="11" stroke-linecap="round" fill="none" transform="rotate(180 50 79)"/>
+          <circle cx="50" cy="20" r="11" fill="#F3A22A"/>
+          <circle cx="78" cy="68" r="11" fill="#35BEBB"/>
+          <circle cx="22" cy="68" r="11" fill="#EE5A4E"/>
+        </svg>
+        <div class="brand-word">Ten Capital<span>Network</span></div>
+      </div>
     </div>
 
-    <a id="download" class="download" href="#">⬇ Download your PDF</a>
+    <div class="card">
+      <div class="eyebrow">Deck Analyzer</div>
+      <h1>Pitch Deck<span class="arrow">&rarr;</span><span class="to">Investor One&#8209;Pager</span></h1>
+      <p class="lede">Upload a pitch deck and get a polished single-page investor PDF,
+        analyzed and structured by Claude.</p>
 
-    <div class="meta">
-      The uploaded file is processed on the server and a copy of every generated
-      one-pager is emailed to <code>{{ recipient }}</code>.
-      {% if not key_set %}<br><strong>⚠ Server has no ANTHROPIC_API_KEY set.</strong>{% endif %}
-      {% if not mail_ready %}<br><strong>⚠ SMTP is not configured; the emailed copy will be skipped.</strong>{% endif %}
+      <form id="form" method="post" action="{{ url_for('generate') }}" enctype="multipart/form-data">
+        <label class="dropzone" id="dropzone" for="deck">
+          <div class="dropzone-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#F3F6FA" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M14 3v4a1 1 0 0 0 1 1h4"/>
+              <path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2Z"/>
+            </svg>
+          </div>
+          <div class="dropzone-title">Click or drop a deck here</div>
+          <div class="dropzone-sub"><b>.pptx</b> &middot; <b>.pdf</b> &middot; <b>.docx</b> &nbsp;·&nbsp; up to {{ max_mb }}&nbsp;MB</div>
+          <input class="file-input" type="file" id="deck" name="deck" accept=".pptx,.pdf,.docx" required>
+          <div class="fname" id="fname"></div>
+        </label>
+
+        <button class="cta" id="go" type="submit">Generate one-pager PDF</button>
+      </form>
+
+      <div class="status" id="status">
+        <div class="spinner"></div>
+        <div id="statusText">Working…</div>
+      </div>
+
+      <a class="download" id="download" href="#">⬇ Download your one-pager</a>
+
+      <div class="flash" id="flash"></div>
+      <div class="ok" id="ok"></div>
+
+      <div class="disclosure">
+        The uploaded file is processed on the server and a copy of every generated
+        one-pager is emailed to <code>{{ recipient }}</code>.
+        {% if not key_set %}<br><span class="warn">⚠ Server has no ANTHROPIC_API_KEY set.</span>{% endif %}
+        {% if not mail_ready %}<br><span class="warn">⚠ Email is not configured; the emailed copy will be skipped.</span>{% endif %}
+      </div>
     </div>
+
+    <footer>Powered by TEN Capital Network</footer>
+
   </div>
 
   <script>
-    const form    = document.getElementById('form');
-    const go       = document.getElementById('go');
-    const flash    = document.getElementById('flash');
-    const okMsg    = document.getElementById('ok');
-    const deck     = document.getElementById('deck');
-    const fname    = document.getElementById('fname');
-    const statusEl = document.getElementById('status');
-    const statusTx = document.getElementById('statusText');
-    const download = document.getElementById('download');
-    const LABEL    = 'Generate one-pager PDF';
-    const POLL_MS  = 3000;
+    const form     = document.getElementById('form');
+    const go        = document.getElementById('go');
+    const deck      = document.getElementById('deck');
+    const fname     = document.getElementById('fname');
+    const dropzone  = document.getElementById('dropzone');
+    const flash     = document.getElementById('flash');
+    const okMsg     = document.getElementById('ok');
+    const statusEl  = document.getElementById('status');
+    const statusTx  = document.getElementById('statusText');
+    const download  = document.getElementById('download');
+    const LABEL     = 'Generate one-pager PDF';
+    const POLL_MS   = 3000;
 
     let pollTimer = null;
 
-    function showError(msg) {
-      flash.textContent = msg;
-      flash.style.display = 'block';
-    }
+    function showError(msg) { flash.textContent = msg; flash.style.display = 'block'; }
+    function updateName()   { fname.textContent = deck.files[0] ? deck.files[0].name : ''; }
+    function resetCta()     { go.disabled = false; go.textContent = LABEL; statusEl.style.display = 'none'; }
 
-    function resetUi() {
-      go.disabled = false;
-      go.textContent = LABEL;
-      statusEl.style.display = 'none';
-    }
+    deck.addEventListener('change', updateName);
+
+    // Drag-and-drop onto the dropzone.
+    ['dragover', 'dragenter'].forEach(ev =>
+      dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+    ['dragleave', 'dragend'].forEach(ev =>
+      dropzone.addEventListener(ev, () => dropzone.classList.remove('drag')));
+    dropzone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropzone.classList.remove('drag');
+      if (e.dataTransfer.files && e.dataTransfer.files.length) {
+        deck.files = e.dataTransfer.files;
+        updateName();
+      }
+    });
 
     async function poll(jobId) {
       try {
@@ -177,7 +323,7 @@ PAGE = r"""
           download.style.display = 'block';
           okMsg.textContent = '✅ Your one-pager is ready — a copy was ' +
             (j.mail_status === 'sent' ? 'emailed to the team.' :
-             j.mail_status === 'skipped' ? 'not emailed (SMTP off).' :
+             j.mail_status === 'skipped' ? 'not emailed (email off).' :
              'not emailed (send failed) — you can still download it.');
           okMsg.style.display = 'block';
           if (j.mail_status === 'failed' && j.mail_error) {
@@ -185,7 +331,7 @@ PAGE = r"""
           }
           // Auto-trigger the download, and leave the button for a manual retry.
           window.location.href = j.download_url;
-          resetUi();
+          resetCta();
           form.reset();
           fname.textContent = '';
           return;
@@ -193,7 +339,7 @@ PAGE = r"""
 
         if (j.status === 'error') {
           showError(j.error || 'Generation failed.');
-          resetUi();
+          resetCta();
           return;
         }
 
@@ -222,7 +368,7 @@ PAGE = r"""
           try { const j = await res.json(); if (j && j.error) msg = j.error; }
           catch (_) { /* non-JSON error body */ }
           showError(msg);
-          resetUi();
+          resetCta();
           return;
         }
 
@@ -233,7 +379,7 @@ PAGE = r"""
         poll(j.job_id);
       } catch (err) {
         showError('Network error: ' + err.message);
-        resetUi();
+        resetCta();
       }
     });
   </script>

@@ -220,7 +220,7 @@ PAGE = r"""
     <div class="brand">
       <!-- Real logo if static/logo.png exists; otherwise fall back to the SVG lockup. -->
       <span class="brand-chip" id="brandChip">
-        <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}"
+        <img class="brand-logo" src="{{ url_for('static', filename='logo.webp') }}"
              alt="TEN Capital Network"
              onerror="document.getElementById('brandChip').style.display='none'; document.getElementById('brandFallback').style.display='flex';">
       </span>

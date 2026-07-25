@@ -83,7 +83,12 @@ PAGE = r"""
 
     /* brand lockup */
     .brand{ display:flex; align-items:center; gap:12px; margin-bottom:28px; padding-left:4px; }
-    .brand-logo{ height:44px; width:auto; display:block; }
+    /* White chip so the logo's dark wordmark stays readable on the navy header. */
+    .brand-chip{
+      display:inline-flex; align-items:center; background:#FFFFFF; border-radius:11px;
+      padding:8px 13px; box-shadow:0 8px 22px -10px rgba(0,0,0,0.55);
+    }
+    .brand-logo{ height:34px; width:auto; display:block; }
     .brand-fallback{ display:none; align-items:center; gap:12px; }
     .brand-mark{ width:34px; height:34px; flex-shrink:0; }
     .brand-word{
@@ -214,9 +219,11 @@ PAGE = r"""
 
     <div class="brand">
       <!-- Real logo if static/logo.png exists; otherwise fall back to the SVG lockup. -->
-      <img class="brand-logo" src="{{ url_for('static', filename='logo.png') }}"
-           alt="TEN Capital Network"
-           onerror="this.remove(); document.getElementById('brandFallback').style.display='flex';">
+      <span class="brand-chip" id="brandChip">
+        <img class="brand-logo" src="{{ url_for('static', filename='logo.webp') }}"
+             alt="TEN Capital Network"
+             onerror="document.getElementById('brandChip').style.display='none'; document.getElementById('brandFallback').style.display='flex';">
+      </span>
       <div class="brand-fallback" id="brandFallback">
         <svg class="brand-mark" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
           <path d="M50 6 C64 6 74 16 74 16" stroke="#F3A22A" stroke-width="11" stroke-linecap="round" fill="none"/>

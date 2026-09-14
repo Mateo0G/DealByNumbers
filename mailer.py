@@ -31,12 +31,12 @@ from email.message import EmailMessage
 # Where generated documents are always copied. Overridable via $MAIL_TO for
 # testing or a different destination, but defaults to the address the feature
 # was built for.
-DEFAULT_RECIPIENT = "mateo.ghercioiu@gmail.com"
+DEFAULT_RECIPIENT = "info@tencapital.group"
 
 # Resend's shared onboarding sender. It works with no domain verification, but
-# Resend then only allows delivery to the account owner's own email address —
-# which is exactly our default recipient. Override with $RESEND_FROM once a
-# domain is verified (e.g. "One-Pagers <noreply@yourdomain.com>").
+# Resend then only allows delivery to the account owner's own email address on
+# the Resend account. Override with $RESEND_FROM once a domain is verified
+# (e.g. "One-Pagers <noreply@yourdomain.com>") to send to any recipient.
 DEFAULT_RESEND_FROM = "onboarding@resend.dev"
 
 RESEND_ENDPOINT = "https://api.resend.com/emails"

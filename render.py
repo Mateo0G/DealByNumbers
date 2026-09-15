@@ -11,6 +11,9 @@ a closing footnote.
 
 from __future__ import annotations
 
+import os
+from datetime import date
+from functools import partial
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -28,14 +31,22 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-# Palette — understated, investor-professional.
-INK = colors.HexColor("#20262E")
-MUTED = colors.HexColor("#66707E")
-ACCENT = colors.HexColor("#294F9E")
-RULE = colors.HexColor("#D2D6DC")
-BAR_BG = colors.HexColor("#E6E9ED")
-TABLE_HEAD_BG = colors.HexColor("#294F9E")
-TABLE_ALT_BG = colors.HexColor("#F2F4F7")
+# Palette — TEN Capital Network brand (navy ink, warm-to-teal gradient mark).
+INK = colors.HexColor("#16283F")
+MUTED = colors.HexColor("#5C6E86")
+ACCENT = colors.HexColor("#2A9D9A")
+RULE = colors.HexColor("#C4D0E0")
+BAR_BG = colors.HexColor("#EAEFF5")
+TABLE_HEAD_BG = colors.HexColor("#16283F")
+TABLE_ALT_BG = colors.HexColor("#F3F6FA")
+
+# Brand mark gradient (amber -> coral -> teal), used for the top page bar.
+GRADIENT_STOPS = [
+    (0.0, colors.HexColor("#F3A22A")),
+    (0.5, colors.HexColor("#EE5A4E")),
+    (1.0, colors.HexColor("#35BEBB")),
+]
+GRADIENT_BAR_H = 0.09 * inch
 
 FOOTNOTE = "Figures marked (est.) are analyst estimates, not from the deck."
 NOT_SPECIFIED = "Not specified in deck"
@@ -43,6 +54,10 @@ NOT_SPECIFIED = "Not specified in deck"
 PAGE_W, PAGE_H = letter
 MARGIN = 0.55 * inch
 CONTENT_W = PAGE_W - 2 * MARGIN
+
+BRAND_NAME = "TEN CAPITAL NETWORK"
+LOGO_PATH = os.path.join(os.path.dirname(__file__), "static", "logo-mark.png")
+FOOTER_H = 0.34 * inch
 
 
 def _s(v) -> str:
@@ -110,6 +125,66 @@ def _styles() -> dict[str, ParagraphStyle]:
 
 
 # --------------------------------------------------------------------------- #
+# Page decoration — brand gradient bar + footer, drawn on every page
+# --------------------------------------------------------------------------- #
+def _gradient_color_at(t: float) -> colors.Color:
+    for (p0, c0), (p1, c1) in zip(GRADIENT_STOPS, GRADIENT_STOPS[1:]):
+        if p0 <= t <= p1:
+            local_t = 0.0 if p1 == p0 else (t - p0) / (p1 - p0)
+            return colors.Color(
+                c0.red + (c1.red - c0.red) * local_t,
+                c0.green + (c1.green - c0.green) * local_t,
+                c0.blue + (c1.blue - c0.blue) * local_t,
+            )
+    return GRADIENT_STOPS[-1][1]
+
+
+def _draw_gradient_bar(c) -> None:
+    c.saveState()
+    segments = 80
+    seg_w = PAGE_W / segments
+    y = PAGE_H - GRADIENT_BAR_H
+    for i in range(segments):
+        t = (i + 0.5) / segments
+        c.setFillColor(_gradient_color_at(t))
+        c.rect(i * seg_w, y, seg_w + 0.75, GRADIENT_BAR_H, stroke=0, fill=1)
+    c.restoreState()
+
+
+def _draw_footer(c, footer_date: str) -> None:
+    c.saveState()
+    y_rule = FOOTER_H
+    c.setStrokeColor(RULE)
+    c.setLineWidth(0.6)
+    c.line(MARGIN, y_rule, PAGE_W - MARGIN, y_rule)
+
+    y_text = y_rule - 13
+    icon_h = icon_w = 10
+    name_x = MARGIN
+    if os.path.exists(LOGO_PATH):
+        c.drawImage(
+            LOGO_PATH, MARGIN, y_text - 1.5, width=icon_w, height=icon_h,
+            preserveAspectRatio=True, mask="auto",
+        )
+        name_x = MARGIN + icon_w + 5
+
+    c.setFont("Helvetica-Bold", 6.5)
+    c.setFillColor(INK)
+    c.drawString(name_x, y_text, BRAND_NAME)
+
+    c.setFont("Helvetica", 6.5)
+    c.setFillColor(MUTED)
+    c.drawCentredString(PAGE_W / 2, y_text, f"Page {c.getPageNumber()}")
+    c.drawRightString(PAGE_W - MARGIN, y_text, footer_date)
+    c.restoreState()
+
+
+def _decorate_page(canvas, doc, footer_date: str) -> None:
+    _draw_gradient_bar(canvas)
+    _draw_footer(canvas, footer_date)
+
+
+# --------------------------------------------------------------------------- #
 # Allocation bar flowable (use-of-funds)
 # --------------------------------------------------------------------------- #
 class AllocationBars(Flowable):
@@ -168,7 +243,10 @@ def render(data: dict, output_path: str) -> None:
 
     def section(title: str, builder) -> None:
         """Add a section header + attribution + built flowables, kept together."""
-        block: list = [Paragraph(_esc(title), st["section"])]
+        block: list = [
+            Paragraph(_esc(title), st["section"]),
+            _rule(0.9, ACCENT, space_before=0, space_after=3),
+        ]
         if attrib:
             block.append(Paragraph(_esc(attrib), st["attrib"]))
         content = builder()
@@ -200,10 +278,12 @@ def render(data: dict, output_path: str) -> None:
     doc = SimpleDocTemplate(
         output_path, pagesize=letter,
         leftMargin=MARGIN, rightMargin=MARGIN,
-        topMargin=MARGIN, bottomMargin=MARGIN,
+        topMargin=MARGIN + GRADIENT_BAR_H + 0.05 * inch,
+        bottomMargin=MARGIN + FOOTER_H,
         title=_s(data.get("company_name")) + " — Investor One-Pager",
     )
-    doc.build(story)
+    page_cb = partial(_decorate_page, footer_date=date.today().strftime("%B %d, %Y"))
+    doc.build(story, onFirstPage=page_cb, onLaterPages=page_cb)
 
 
 # --------------------------------------------------------------------------- #

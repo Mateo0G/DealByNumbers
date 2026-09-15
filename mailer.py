@@ -117,7 +117,7 @@ def _send_via_resend(
 ) -> str:
     """Send over the Resend HTTPS API (port 443)."""
     api_key = os.getenv("RESEND_API_KEY")
-    sender = os.getenv("RESEND_FROM", DEFAULT_RESEND_FROM)
+    sender = os.getenv("RESEND_FROM") or DEFAULT_RESEND_FROM
 
     payload = {
         "from": sender,
@@ -164,7 +164,7 @@ def _send_via_smtp(
     user = os.getenv("SMTP_USER")
     password = os.getenv("SMTP_PASSWORD")
     port = int(os.getenv("SMTP_PORT", "587"))
-    sender = os.getenv("SMTP_FROM", user)
+    sender = os.getenv("SMTP_FROM") or user
 
     msg = EmailMessage()
     msg["From"] = sender
